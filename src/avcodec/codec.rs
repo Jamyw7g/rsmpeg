@@ -104,6 +104,11 @@ impl<'codec> AVCodec {
         // terminates with -1
         Self::build_array(self.sample_fmts, -1)
     }
+
+    pub fn channel_layouts(&'codec self) -> Option<&'codec [u64]> {
+        // terminates with -1
+        Self::build_array(self.channel_layouts, 0)
+    }
 }
 
 impl Drop for AVCodec {
@@ -174,79 +179,6 @@ impl AVCodecContext {
         }
     }
 
-    /// This is a wrapper around the deprecated api `avcodec_decode_video2()` and
-    /// `avcodec_decode_audio4()`.
-    ///
-    /// Return `Some(frame)` on getting a frame([`AVFrame`]), return `None` on
-    /// not getting frame(or say frame decoding haven't finished), Return
-    /// `Err(_)` on decoding error.
-    #[deprecated = "This is a wrapper around the deprecated api `avcodec_decode_video2()` and `avcodec_decode_audio4()`."]
-    pub fn decode_packet(&mut self, packet: &AVPacket) -> Result<Option<AVFrame>> {
-        let mut frame = AVFrame::new();
-        let mut got_frame = 0;
-        if self.codec().type_ == ffi::AVMediaType_AVMEDIA_TYPE_VIDEO {
-            unsafe {
-                ffi::avcodec_decode_video2(
-                    self.as_mut_ptr(),
-                    frame.as_mut_ptr(),
-                    &mut got_frame,
-                    packet.as_ptr(),
-                )
-            }
-        } else if self.codec().type_ == ffi::AVMediaType_AVMEDIA_TYPE_AUDIO {
-            unsafe {
-                ffi::avcodec_decode_audio4(
-                    self.as_mut_ptr(),
-                    frame.as_mut_ptr(),
-                    &mut got_frame,
-                    packet.as_ptr(),
-                )
-            }
-        } else {
-            panic!("Decode in strange codec context.");
-        }
-        .upgrade()?;
-        Ok(if got_frame != 0 { Some(frame) } else { None })
-    }
-
-    /// This is a wrapper around deprecated api: `avcodec_encode_video2` and `avcodec_encode_audio2`.
-    ///
-    /// Return `Some(Packet)` on getting a packet([`AVPacket`]), return `None`
-    /// on not getting packet(or say packet encoding haven't finished), Return
-    /// `Err(_)` on decoding error.
-    #[deprecated = "This is a wrapper around deprecated api: `avcodec_encode_video2` and `avcodec_encode_audio2`."]
-    pub fn encode_frame(&mut self, frame: Option<&AVFrame>) -> Result<Option<AVPacket>> {
-        let frame_ptr = match frame {
-            Some(frame) => frame.as_ptr(),
-            None => ptr::null(),
-        };
-        let mut packet = AVPacket::new();
-        let mut got_packet = 0;
-        if self.codec().type_ == ffi::AVMediaType_AVMEDIA_TYPE_VIDEO {
-            unsafe {
-                ffi::avcodec_encode_video2(
-                    self.as_mut_ptr(),
-                    packet.as_mut_ptr(),
-                    frame_ptr,
-                    &mut got_packet,
-                )
-            }
-        } else if self.codec().type_ == ffi::AVMediaType_AVMEDIA_TYPE_AUDIO {
-            unsafe {
-                ffi::avcodec_encode_audio2(
-                    self.as_mut_ptr(),
-                    packet.as_mut_ptr(),
-                    frame_ptr,
-                    &mut got_packet,
-                )
-            }
-        } else {
-            panic!("Decode in strange codec context.");
-        }
-        .upgrade()?;
-        Ok(if got_packet != 0 { Some(packet) } else { None })
-    }
-
     /// Trying to push a packet to current decoding_context([`AVCodecContext`]).
     pub fn send_packet(&mut self, packet: Option<&AVPacket>) -> Result<()> {
         let packet_ptr = match packet {
@@ -255,7 +187,7 @@ impl AVCodecContext {
         };
         match unsafe { ffi::avcodec_send_packet(self.as_mut_ptr(), packet_ptr) }.upgrade() {
             Ok(_) => Ok(()),
-            Err(AVERROR_EAGAIN) => Err(RsmpegError::SendPacketAgainError),
+            Err(AVERROR_EAGAIN) => Err(RsmpegError::DecoderFullError),
             Err(ffi::AVERROR_EOF) => Err(RsmpegError::DecoderFlushedError),
             Err(x) => Err(RsmpegError::SendPacketError(x)),
         }
@@ -301,7 +233,15 @@ impl AVCodecContext {
     }
 
     /// Fill the codec context based on the values from the supplied codec parameters.
-    pub fn set_codecpar(&mut self, codecpar: AVCodecParametersRef) -> Result<()> {
+    ///
+    /// ATTENTION: There is no codecpar field in `AVCodecContext`, this function
+    /// just fill the codec context based on the values from the supplied codec
+    /// parameters. Any allocated fields in current `AVCodecContext` that have a
+    /// corresponding field in `codecpar` are freed and replaced with duplicates
+    /// of the corresponding field in `codecpar`. Fields in current
+    /// `AVCodecContext` that do not have a counterpart in given `codecpar` are
+    /// not touched.
+    pub fn apply_codecpar(&mut self, codecpar: AVCodecParametersRef) -> Result<()> {
         unsafe { ffi::avcodec_parameters_to_context(self.as_mut_ptr(), codecpar.as_ptr()) }
             .upgrade()
             .map_err(|_| RsmpegError::CodecSetParameterError)?;
@@ -316,6 +256,15 @@ impl AVCodecContext {
             .upgrade()
             .unwrap();
         parameters
+    }
+
+    /// Is hardware accelaration enabled in this codec context.
+    pub fn is_hwaccel(&self) -> bool {
+        // We doesn't expose the `AVHWAccel` because the documentationstates:
+        //
+        // Nothing in this structure should be accessed by the user. At some
+        // point in future it will not be externally visible at all.
+        !self.hwaccel.is_null()
     }
 }
 

@@ -39,7 +39,7 @@ Start by adding `rsmpeg` to your `Cargo.toml` file:
 
 ```rust
 [dependencies]
-rsmpeg = "0.3.0"
+rsmpeg = "0.5.0"
 ```
 
 Write your simple media file info dumper:
@@ -64,7 +64,7 @@ Prepare a simple image in your current folder:
 
 ![test.jpg](./assets/mountain.jpg)
 
-Run with `FFMPEG_PKG_CONFIG_PATH` set to the pkgconfig file path in your artifact folder (`xxx/ffmpeg_build/lib/pkgconfig`).
+Run with `FFMPEG_PKG_CONFIG_PATH` set to the pkgconfig file path (Absolute path!) in your artifact folder (`xxx/ffmpeg_build/lib/pkgconfig`).
 
 ```bash
 # macOS & Linux
@@ -98,3 +98,10 @@ You can also put any video or audio file here, this program will dump the media 
 Supported FFmpeg version is 4.0-4.4.
 
 Minimum Supported Rust Version is 1.52(Stable channel).
+
+## Contributors
+
+Thanks for your contributions!
+
++ [@FallingSnow](https://github.com/FallingSnow)
++ [@Jamyw7g](https://github.com/Jamyw7g)

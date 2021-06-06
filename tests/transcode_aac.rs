@@ -27,7 +27,7 @@ fn open_input_file(input_file: &CStr) -> (AVFormatContextInput, AVCodecContext) 
 
     let mut decode_context = AVCodecContext::new(&decode_codec);
     decode_context
-        .set_codecpar(input_format_context.streams().get(0).unwrap().codecpar())
+        .apply_codecpar(input_format_context.streams().get(0).unwrap().codecpar())
         .unwrap();
     decode_context.open(None).unwrap();
     (input_format_context, decode_context)
@@ -63,7 +63,7 @@ fn open_output_file(
 
     {
         /* Create a new audio stream in the output file container. */
-        let mut stream = output_format_context.new_stream(None);
+        let mut stream = output_format_context.new_stream();
         /* Set the sample rate for the container. */
         stream.set_time_base(AVRational {
             den: decode_context.sample_rate,
@@ -130,7 +130,7 @@ fn add_samples_to_fifo(
     num_samples: i32,
 ) -> Result<()> {
     fifo.realloc(fifo.size() + num_samples);
-    if unsafe { fifo.write((&**samples_buffer).as_ptr(), num_samples) }? < num_samples {
+    if unsafe { fifo.write(samples_buffer.audio_data.as_ptr(), num_samples) }? < num_samples {
         panic!("samples doesn't all written.");
     }
     Ok(())
@@ -154,7 +154,8 @@ fn read_decode_convert_and_store(
             frame.nb_samples,
             encode_context.sample_fmt,
             0,
-        );
+        )
+        .unwrap();
         unsafe {
             resample_context.convert(
                 &mut samples_buffer,

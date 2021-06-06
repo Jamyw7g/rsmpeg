@@ -16,8 +16,7 @@ fn metadata(file: &str) -> Result<Vec<(String, String)>> {
     result.push(("bit_rate".into(), input_format_context.bit_rate.to_string()));
 
     // Get additional info from `input_format_context.metadata()`
-    {
-        let metadata = input_format_context.metadata();
+    if let Some(metadata) = input_format_context.metadata() {
         let mut prev_entry = None;
 
         // Trick to get all entries.
@@ -49,7 +48,7 @@ fn metadata(file: &str) -> Result<Vec<(String, String)>> {
         // Get `width` and `height` from `decode_context`
         let mut decode_context = AVCodecContext::new(&decoder);
         decode_context
-            .set_codecpar(video_stream.codecpar())
+            .apply_codecpar(video_stream.codecpar())
             .unwrap();
         decode_context.open(None).unwrap();
         result.push(("width".into(), decode_context.width.to_string()));

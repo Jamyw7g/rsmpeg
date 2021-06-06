@@ -7,11 +7,10 @@ use std::{
 
 use crate::{
     avcodec::{
-        AVCodec, AVCodecParameters, AVCodecParametersMut, AVCodecParametersRef, AVCodecRef,
-        AVPacket,
+        AVCodecParameters, AVCodecParametersMut, AVCodecParametersRef, AVCodecRef, AVPacket,
     },
     avformat::AVIOContext,
-    avutil::{AVDictionaryMut, AVDictionaryRef, AVRational},
+    avutil::{AVDictionary, AVDictionaryMut, AVDictionaryRef, AVRational},
     error::{Result, RsmpegError},
     ffi,
     shared::*,
@@ -49,7 +48,7 @@ impl AVFormatContextInput {
 
     /// Dump [`ffi::AVFormatContext`]'s info in the "FFmpeg" way.
     ///
-    /// The filename here is just for info printing, it really doesn't matter.
+    /// The index and filename here is just for info printing, it really doesn't matter.
     pub fn dump(&mut self, index: usize, filename: &CStr) -> Result<()> {
         unsafe {
             // This input context, so the last parameter is 0
@@ -81,8 +80,11 @@ impl AVFormatContextInput {
         &self,
         media_type: ffi::AVMediaType,
     ) -> Result<Option<(usize, AVCodecRef<'static>)>> {
-        // After FFmpeg 4.4 this should be changed to *const AVCodec, here we preserve the backward compatibility.
-        let mut dec = ptr::null_mut();
+        // After FFmpeg 4.4 this should be changed to *const AVCodec, here we
+        // preserve the backward compatibility.
+        let dec = ptr::null_mut();
+        let mut dec = dec as _;
+
         // ATTENTION: usage different from FFmpeg documentation.
         //
         // According to ffmpeg's source code, here we legally assume that
@@ -93,7 +95,7 @@ impl AVFormatContextInput {
         .upgrade()
         {
             Ok(index) => Ok(Some((index as usize, unsafe {
-                AVCodecRef::from_raw(NonNull::new(dec).unwrap())
+                AVCodecRef::from_raw(NonNull::new(dec as *mut _).unwrap())
             }))),
             Err(ffi::AVERROR_STREAM_NOT_FOUND) => Ok(None),
             Err(e) => Err(RsmpegError::AVError(e)),
@@ -111,15 +113,20 @@ impl<'stream> AVFormatContextInput {
         }
     }
 
-    /// Get Iterator of all [`AVInputFormat`]s in the [`ffi::AVFormatContext`].
-    pub fn iformat(&'stream self) -> Option<AVInputFormatRef<'stream>> {
-        NonNull::new(self.iformat).map(|x| unsafe { AVInputFormatRef::from_raw(x) })
+    /// Get [`AVInputFormatRef`] in the [`AVFormatContextInput`].
+    pub fn iformat(&'stream self) -> AVInputFormatRef<'stream> {
+        // From the implementation of FFmpeg's `avformat_open_input`, we can be
+        // sure that iformat won't be null when demuxing.
+        unsafe { AVInputFormatRef::from_raw(NonNull::new(self.iformat as *mut _).unwrap()) }
     }
 
     /// Get metadata of the [`ffi::AVFormatContext`] in [`crate::avutil::AVDictionary`].
     /// demuxing: set by libavformat in `avformat_open_input()`
     /// muxing: may be set by the caller before `avformat_write_header()`
     pub fn metadata(&'stream self) -> Option<AVDictionaryRef<'stream>> {
+        // From implementation:
+        // `avformat_find_stream_info()->()read_frame_internal()`, we know
+        // `metadata` can be null.
         NonNull::new(self.metadata).map(|x| unsafe { AVDictionaryRef::from_raw(x) })
     }
 }
@@ -230,18 +237,19 @@ impl<'stream> AVFormatContextOutput {
         }
     }
 
-    /// Get Iterator of all [`AVOutputFormat`]s in the [`ffi::AVFormatContext`].
-    pub fn oformat(&'stream self) -> Option<AVOutputFormatRef<'stream>> {
-        NonNull::new(self.oformat).map(|x| unsafe { AVOutputFormatRef::from_raw(x) })
+    /// Get [`AVOutputFormatRef`] in the [`AVFormatContextOutput`].
+    pub fn oformat(&'stream self) -> AVOutputFormatRef<'stream> {
+        // From the implementation of FFmpeg's `avformat_alloc_output_context2`,
+        // we can be sure that `oformat` won't be null when muxing.
+        unsafe { AVOutputFormatRef::from_raw(NonNull::new(self.oformat as *mut _).unwrap()) }
     }
 
-    /// Add a new stream to a media file.
-    pub fn new_stream(&'stream mut self, codec: Option<&AVCodec>) -> AVStreamMut<'stream> {
-        let codec_ptr = match codec {
-            Some(codec) => codec.as_ptr(),
-            None => ptr::null(),
-        };
-        let new_stream = unsafe { ffi::avformat_new_stream(self.as_mut_ptr(), codec_ptr) }
+    /// Add a new stream to a media file, should be called by the user before
+    /// [`Self::write_header()`];
+    pub fn new_stream(&'stream mut self) -> AVStreamMut<'stream> {
+        // According to the FFmpeg documention and inner implementation, the
+        // second parameter of avformat_new_stream is unused. So ignore it.
+        let new_stream = unsafe { ffi::avformat_new_stream(self.as_mut_ptr(), ptr::null()) }
             .upgrade()
             .unwrap();
 
@@ -293,9 +301,25 @@ impl AVStream {
         let result = unsafe { ffi::av_stream_get_end_pts(self.as_ptr()) };
         (result >= 0).then(|| result as i64)
     }
+}
+
+impl<'stream> AVStream {
+    /// Get codec parameters of current stream.
+    pub fn codecpar(&'stream self) -> AVCodecParametersRef<'stream> {
+        // Implementation of `avformat_new_stream` tells us this cannot be Null.
+        unsafe { AVCodecParametersRef::from_raw(NonNull::new(self.codecpar).unwrap()) }
+    }
+
+    /// Get mutable reference of codec parameters in current stream.
+    pub fn codecpar_mut(&'stream mut self) -> AVCodecParametersMut<'stream> {
+        unsafe { AVCodecParametersMut::from_raw(NonNull::new(self.codecpar).unwrap()) }
+    }
 
     /// Set codecpar of current stream with given `parameters`.
     pub fn set_codecpar(&mut self, parameters: AVCodecParameters) {
+        // Since the codecpar in AVStram is always NonNull, this function accepts
+        // a Parameters rather than Option<Parameters>
+
         // ATTENTION: this workflow differs from c version.
         if let Some(codecpar) = self.codecpar.upgrade() {
             let _ = unsafe { AVCodecParameters::from_raw(codecpar) };
@@ -304,27 +328,28 @@ impl AVStream {
             self.deref_mut().codecpar = parameters.into_raw().as_ptr();
         }
     }
-}
-
-impl<'stream> AVStream {
-    /// Get codec parameters of current stream.
-    pub fn codecpar(&'stream self) -> Option<AVCodecParametersRef<'stream>> {
-        NonNull::new(self.codecpar).map(|x| unsafe { AVCodecParametersRef::from_raw(x) })
-    }
 
     /// Get metadata of current stream.
     pub fn metadata(&'stream self) -> Option<AVDictionaryRef<'stream>> {
         NonNull::new(self.metadata).map(|x| unsafe { AVDictionaryRef::from_raw(x) })
     }
 
-    /// Get mutable reference of codec parameters in current stream.
-    pub fn codecpar_mut(&'stream mut self) -> Option<AVCodecParametersMut<'stream>> {
-        NonNull::new(self.codecpar).map(|x| unsafe { AVCodecParametersMut::from_raw(x) })
-    }
-
     /// Get mutable reference of metadata in current stream.
     pub fn metadata_mut(&'stream mut self) -> Option<AVDictionaryMut<'stream>> {
         NonNull::new(self.metadata).map(|x| unsafe { AVDictionaryMut::from_raw(x) })
+    }
+
+    /// Set metadata of current [`AVStream`].
+    pub fn set_metadata(&mut self, dict: Option<AVDictionary>) {
+        // Drop the old_dict
+        let _ = NonNull::new(self.metadata).map(|x| unsafe { AVDictionary::from_raw(x) });
+
+        // Move in the new dict.
+        unsafe {
+            self.deref_mut().metadata = dict
+                .map(|x| x.into_raw().as_ptr())
+                .unwrap_or(ptr::null_mut());
+        }
     }
 }
 
