@@ -100,7 +100,7 @@ impl AVBSFContext {
     /// Retrieve a filtered packet.
     ///
     /// After sending each packet, the filter must be completely drained by
-    /// calling [`receive_packet()`] repeatedly until it returns
+    /// calling [`Self::receive_packet()`] repeatedly until it returns
     /// [`RsmpegError::BitstreamDrainError`] or
     /// [`RsmpegError::BitstreamFlushedError`].
     ///
@@ -231,7 +231,7 @@ mod test {
     #[test]
     fn test_null_filter() {
         let ctx = AVBSFContextUninit::get_null();
-        assert_eq!(cstr!("bsf_list"), ctx.filter().name());
+        assert_eq!(cstr!("null"), ctx.filter().name());
     }
 
     #[test]

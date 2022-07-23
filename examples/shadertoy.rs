@@ -8,7 +8,7 @@ use glfw::{Context, OpenGlProfileHint, Window, WindowHint};
 use rsmpeg::{
     avcodec::{AVCodec, AVCodecContext},
     avformat::AVFormatContextOutput,
-    avutil::{AVFrame, AVRational},
+    avutil::{ra, AVFrame},
     error::RsmpegError,
 };
 use std::{
@@ -219,8 +219,8 @@ fn shadertoy(
         encode_context.set_bit_rate(400000);
         encode_context.set_width(width);
         encode_context.set_height(height);
-        encode_context.set_time_base(AVRational { num: 1, den: 60 });
-        encode_context.set_framerate(AVRational { num: 60, den: 1 });
+        encode_context.set_time_base(ra(1, 60));
+        encode_context.set_framerate(ra(60, 1));
         encode_context.set_gop_size(10);
         encode_context.set_max_b_frames(1);
         encode_context.set_pix_fmt(rsmpeg::ffi::AVPixelFormat_AV_PIX_FMT_RGB24);
@@ -237,14 +237,14 @@ fn shadertoy(
 
     // Create a output_format_context for video container writing.
     let mut output_format_context = {
-        let mut output_format_context = AVFormatContextOutput::create(output_video_path)?;
+        let mut output_format_context = AVFormatContextOutput::create(output_video_path, None)?;
         {
             let mut stream = output_format_context.new_stream();
             stream.set_codecpar(encode_context.extract_codecpar());
             stream.set_time_base(encode_context.time_base);
         }
         output_format_context.dump(0, output_video_path)?;
-        output_format_context.write_header()?;
+        output_format_context.write_header(&mut None)?;
         output_format_context
     };
 

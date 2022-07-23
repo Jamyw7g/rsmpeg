@@ -16,7 +16,7 @@ To use your first rsmpeg demo, you need to compile your FFmpeg:
 1. <https://github.com/ffmpeg/ffmpeg>.
 2. <https://trac.ffmpeg.org/wiki/CompilationGuide>
 
-If you find the compilation compilcated, there are some helpful compiling scripts for you (under the `utils` folder).
+If you find the compilation complicated, there are some helpful compiling scripts for you (under the `utils` folder).
 
 To build a FFmpeg with some common parameters: (don't forget to install the build dependencies)
 
@@ -39,7 +39,7 @@ Start by adding `rsmpeg` to your `Cargo.toml` file:
 
 ```rust
 [dependencies]
-rsmpeg = "0.5.0"
+rsmpeg = "0.11"
 ```
 
 Write your simple media file info dumper:
@@ -64,7 +64,7 @@ Prepare a simple image in your current folder:
 
 ![test.jpg](./assets/mountain.jpg)
 
-Run with `FFMPEG_PKG_CONFIG_PATH` set to the pkgconfig file path (Absolute path!) in your artifact folder (`xxx/ffmpeg_build/lib/pkgconfig`).
+Run with `FFMPEG_PKG_CONFIG_PATH` set to the pkgconfig file path (**Absolute path!**) in your artifact folder (`xxx/ffmpeg_build/lib/pkgconfig`).
 
 ```bash
 # macOS & Linux
@@ -95,13 +95,17 @@ You can also put any video or audio file here, this program will dump the media 
 
 ## Dependency version
 
-Supported FFmpeg version is 4.0-4.4.
+Supported FFmpeg version is 5.0.
 
-Minimum Supported Rust Version is 1.52(Stable channel).
+Minimum Supported Rust Version is 1.56(Stable channel).
 
 ## Contributors
 
 Thanks for your contributions!
 
++ [@nxtn](https://github.com/nxtn)
++ [@aegroto](https://github.com/aegroto)
++ [@nanpuyue](https://github.com/nanpuyue)
++ [@imxood](https://github.com/imxood)
 + [@FallingSnow](https://github.com/FallingSnow)
 + [@Jamyw7g](https://github.com/Jamyw7g)

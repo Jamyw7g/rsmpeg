@@ -1,17 +1,14 @@
-use rsmpeg::avcodec::*;
-use rsmpeg::avformat::*;
-use rsmpeg::avutil::*;
-use rsmpeg::error::RsmpegError;
-use rsmpeg::ffi;
-use rsmpeg::swscale::*;
+use rsmpeg::{avcodec::*, avformat::*, avutil::*, error::RsmpegError, ffi, swscale::*};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use cstr::cstr;
-use std::ffi::CStr;
-use std::fs::{self, File};
-use std::io::prelude::*;
-use std::ops::Deref;
-use std::slice;
+use std::{
+    ffi::CStr,
+    fs::{self, File},
+    io::prelude::*,
+    ops::Deref,
+    slice,
+};
 
 fn thumbnail(
     input_video_path: &CStr,
@@ -29,31 +26,30 @@ fn thumbnail(
         let stream = input_format_context.streams().get(stream_index).unwrap();
 
         let mut decode_context = AVCodecContext::new(&decoder);
-        decode_context.apply_codecpar(stream.codecpar())?;
+        decode_context.apply_codecpar(&stream.codecpar())?;
         decode_context.open(None)?;
 
         (stream_index, decode_context)
     };
 
     let cover_frame = loop {
-        let cover_packet = {
-            let mut cover_packet = None;
-            while let Some(packet) = input_format_context.read_packet()? {
-                // Get first video packet.
-                if packet.stream_index == video_stream_index as i32 {
-                    cover_packet = Some(packet);
-                    break;
-                }
+        let cover_packet = loop {
+            match input_format_context.read_packet()? {
+                Some(x) if x.stream_index != video_stream_index as i32 => {}
+                x => break x,
             }
-            cover_packet.context("Cannnot find video cover packet")?
         };
 
-        decode_context.send_packet(Some(&cover_packet))?;
+        decode_context.send_packet(cover_packet.as_ref())?;
         // repeatedly send packet until a frame can be extracted
         match decode_context.receive_frame() {
             Ok(x) => break x,
             Err(RsmpegError::DecoderDrainError) => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => bail!(e),
+        }
+
+        if cover_packet.is_none() {
+            bail!("Can't find video cover frame");
         }
     };
 
@@ -90,7 +86,7 @@ fn thumbnail(
         )
         .context("Invalid swscontext parameter.")?;
 
-        let mut image_buffer = AVImage::new(
+        let image_buffer = AVImage::new(
             encode_context.pix_fmt,
             encode_context.width,
             encode_context.height,
@@ -98,12 +94,7 @@ fn thumbnail(
         )
         .context("Image buffer parameter invalid.")?;
 
-        let mut scaled_cover_frame = AVFrameWithImageBuffer::new(
-            &mut image_buffer,
-            encode_context.width,
-            encode_context.height,
-            encode_context.pix_fmt,
-        );
+        let mut scaled_cover_frame = AVFrameWithImage::new(image_buffer);
 
         sws_context.scale_frame(
             &cover_frame,
@@ -128,7 +119,7 @@ fn thumbnail(
 }
 
 #[test]
-fn thumbnail_test() {
+fn thumbnail_test0() {
     fs::create_dir_all("tests/output/thumbnail").unwrap();
 
     thumbnail(
@@ -136,6 +127,19 @@ fn thumbnail_test() {
         cstr!("tests/output/thumbnail/bear.jpg"),
         Some(192),
         Some(108),
+    )
+    .unwrap();
+}
+
+#[test]
+fn thumbnail_test1() {
+    fs::create_dir_all("tests/output/thumbnail").unwrap();
+
+    thumbnail(
+        cstr!("tests/assets/vids/video.mp4"),
+        cstr!("tests/output/thumbnail/video.jpg"),
+        Some(280),
+        Some(240),
     )
     .unwrap();
 }

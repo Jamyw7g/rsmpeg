@@ -42,14 +42,14 @@ fn av_spliter(file_path: &CStr, out_video: &str, out_audio: &CStr) -> Result<()>
         bsf_context.init()?
     };
 
-    let mut out_audio_format_context = AVFormatContextOutput::create(out_audio)?;
+    let mut out_audio_format_context = AVFormatContextOutput::create(out_audio, None)?;
     {
         let mut new_audio_stream = out_audio_format_context.new_stream();
         let audio_stream = input_format_context.streams().get(audio_index).unwrap();
         new_audio_stream.set_codecpar(audio_stream.codecpar().clone());
         new_audio_stream.set_time_base(audio_stream.time_base);
     }
-    out_audio_format_context.write_header()?;
+    out_audio_format_context.write_header(&mut None)?;
 
     while let Some(mut packet) = input_format_context.read_packet()? {
         let packet_stream_index = packet.stream_index as usize;

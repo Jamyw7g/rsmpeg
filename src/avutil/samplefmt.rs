@@ -96,8 +96,10 @@ pub fn get_planar_sample_fmt(sample_fmt: AVSampleFormat) -> Option<AVSampleForma
 }
 
 /// Return number of bytes per sample, return `None` when sample format is unknown.
-pub fn get_bytes_per_sample(sample_fmt: AVSampleFormat) -> Option<i32> {
-    NonZeroI32::new(unsafe { ffi::av_get_bytes_per_sample(sample_fmt) }).map(NonZeroI32::get)
+pub fn get_bytes_per_sample(sample_fmt: AVSampleFormat) -> Option<usize> {
+    NonZeroI32::new(unsafe { ffi::av_get_bytes_per_sample(sample_fmt) })
+        .map(NonZeroI32::get)
+        .and_then(|x| x.try_into().ok())
 }
 
 /// Check if the sample format is planar.
@@ -110,6 +112,16 @@ pub fn is_planar(sample_fmt: AVSampleFormat) -> bool {
 // The `nb_samples` of `AVSamples` is the capacity rather than length.
 // `nb_channels` and `audio_data.len()`(which is nb_planes) is only the same
 // when the audio sample format in planar.
+//
+//
+// Check the documentation of `AVFrame::extended_data`:
+//
+// > Note: Both data and extended_data should always be set in a valid frame,
+// > but for planar audio with more channels that can fit in data,
+// > extended_data must be used in order to access all channels.
+//
+// This is the reason why `AVSamples` has a vector of channels for containing
+// audio data.
 wrap! {
     AVSamples: Vec<u8>,
     audio_data: Vec<*mut u8> = Vec::new(),
@@ -160,6 +172,8 @@ impl AVSamples {
     /// sample_fmt          Audio sample formats
     /// align               buffer size alignment (0 = default, 1 = no alignment)
     /// ```
+    ///
+    /// Return `None` on invalid parameters, panic on no memory.
     pub fn new(
         nb_channels: i32,
         nb_samples: i32,

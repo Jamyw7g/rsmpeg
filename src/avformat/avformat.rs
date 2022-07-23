@@ -9,14 +9,23 @@ use crate::{
     avcodec::{
         AVCodecParameters, AVCodecParametersMut, AVCodecParametersRef, AVCodecRef, AVPacket,
     },
-    avformat::AVIOContext,
+    avformat::{AVIOContext, AVIOContextCustom, AVIOContextURL},
     avutil::{AVDictionary, AVDictionaryMut, AVDictionaryRef, AVRational},
     error::{Result, RsmpegError},
     ffi,
     shared::*,
 };
 
-wrap!(AVFormatContextInput: ffi::AVFormatContext);
+/// Container of all kinds of AVIOContexts.
+pub enum AVIOContextContainer {
+    Url(AVIOContextURL),
+    Custom(AVIOContextCustom),
+}
+
+wrap! {
+    AVFormatContextInput: ffi::AVFormatContext,
+    io_context: Option<AVIOContextContainer> = None,
+}
 
 impl AVFormatContextInput {
     /// Create a [`AVFormatContextInput`] instance of a file, and find info of
@@ -34,16 +43,63 @@ impl AVFormatContextInput {
             )
         }
         .upgrade()
-        .map_err(|_| RsmpegError::OpenInputError)?;
+        .map_err(RsmpegError::OpenInputError)?;
 
-        unsafe { ffi::avformat_find_stream_info(input_format_context, ptr::null_mut()) }
+        // Here we can be sure that context is non null, constructing here for
+        // dropping when `avformat_find_stream_info` fails.
+        let mut context = unsafe { Self::from_raw(NonNull::new(input_format_context).unwrap()) };
+
+        unsafe { ffi::avformat_find_stream_info(context.as_mut_ptr(), ptr::null_mut()) }
             .upgrade()
-            .map_err(|_| RsmpegError::FindStreamInfoError)?;
+            .map_err(RsmpegError::FindStreamInfoError)?;
 
-        // Here we can be sure that context is non null
-        let context = NonNull::new(input_format_context).unwrap();
+        Ok(context)
+    }
 
-        Ok(unsafe { Self::from_raw(context) })
+    /// Create a [`AVFormatContextInput`] instance from an [`AVIOContext`], and find info of
+    /// all streams.
+    pub fn from_io_context(mut io_context: AVIOContextContainer) -> Result<Self> {
+        let input_format_context = {
+            // Only fails on no memory, so unwrap().
+            // `avformat_open_input`'s documentation:
+            //
+            // Note that a user-supplied AVFormatContext will be freed on failure.
+            //
+            // So here we don't construct the `AVFormatContext`, or the
+            // `input_format_context` will be double free.
+            let input_format_context = unsafe { ffi::avformat_alloc_context() }.upgrade().unwrap();
+            unsafe {
+                (*input_format_context.as_ptr()).pb = match &mut io_context {
+                    AVIOContextContainer::Url(ctx) => ctx.as_mut_ptr(),
+                    AVIOContextContainer::Custom(ctx) => ctx.as_mut_ptr(),
+                };
+            }
+            input_format_context
+        };
+
+        unsafe {
+            ffi::avformat_open_input(
+                &mut input_format_context.as_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        }
+        .upgrade()
+        .map_err(RsmpegError::OpenInputError)?;
+
+        // After `avformat_open_input`, we can `avformat_close_input` after it,
+        // so here we can safely construct a `AVFormatContextInput`.
+        let mut input_format_context = unsafe { Self::from_raw(input_format_context) };
+        input_format_context.io_context = Some(io_context);
+
+        unsafe {
+            ffi::avformat_find_stream_info(input_format_context.as_mut_ptr(), ptr::null_mut())
+        }
+        .upgrade()
+        .map_err(RsmpegError::FindStreamInfoError)?;
+
+        Ok(input_format_context)
     }
 
     /// Dump [`ffi::AVFormatContext`]'s info in the "FFmpeg" way.
@@ -138,11 +194,15 @@ impl Drop for AVFormatContextInput {
     }
 }
 
-wrap!(AVFormatContextOutput: ffi::AVFormatContext);
+wrap! {
+    AVFormatContextOutput: ffi::AVFormatContext,
+    io_context: Option<AVIOContextContainer> = None,
+}
 
 impl AVFormatContextOutput {
-    /// Open a file and create a [`AVFormatContextOutput`] instance of that file.
-    pub fn create(filename: &CStr) -> Result<Self> {
+    /// Open a file and create a [`AVFormatContextOutput`] instance of that
+    /// file. Give it an [`AVIOContext`] if you want custom IO.
+    pub fn create(filename: &CStr, io_context: Option<AVIOContextContainer>) -> Result<Self> {
         let mut output_format_context = ptr::null_mut();
 
         // Alloc the context
@@ -155,15 +215,34 @@ impl AVFormatContextOutput {
             )
         }
         .upgrade()
-        .map_err(|_| RsmpegError::OpenOutputError)?;
+        .map_err(RsmpegError::OpenOutputError)?;
 
         let mut output_format_context =
             unsafe { Self::from_raw(NonNull::new(output_format_context).unwrap()) };
 
-        // Open corresponding file
-        if unsafe { *output_format_context.oformat }.flags & ffi::AVFMT_NOFILE as i32 == 0 {
-            let io_context = AVIOContext::open(filename, ffi::AVIO_FLAG_WRITE)?.into_raw();
-            unsafe { output_format_context.deref_mut() }.pb = io_context.as_ptr();
+        // Documentation of [`ffi::AVFormatContext::pb`] states:
+        //
+        // Do NOT set this field if AVFMT_NOFILE flag is set in
+        // iformat/oformat.flags. In such a case, the (de)muxer will handle I/O
+        // in some other way and this field will be NULL.
+        //
+        // For safeness, we don't use the user the given AVIOContext even if the
+        // caller provides one.
+        if output_format_context.oformat().flags & ffi::AVFMT_NOFILE as i32 == 0 {
+            // If user provides us an `AVIOCustomContext`, use it, or we create a default one.
+            let mut io_context = match io_context {
+                Some(x) => x,
+                None => {
+                    AVIOContextContainer::Url(AVIOContextURL::open(filename, ffi::AVIO_FLAG_WRITE)?)
+                }
+            };
+            unsafe {
+                output_format_context.deref_mut().pb = match &mut io_context {
+                    AVIOContextContainer::Url(ctx) => ctx.as_mut_ptr(),
+                    AVIOContextContainer::Custom(ctx) => ctx.as_mut_ptr(),
+                };
+            }
+            output_format_context.io_context = Some(io_context);
         }
 
         Ok(output_format_context)
@@ -171,10 +250,25 @@ impl AVFormatContextOutput {
 
     /// Allocate the stream private data and write the stream header to an
     /// output media file.
-    pub fn write_header(&mut self) -> Result<()> {
-        unsafe { ffi::avformat_write_header(self.as_mut_ptr(), ptr::null_mut()) }
+    ///
+    /// - `options`: An [`AVDictionary`] filled with [`AVFormatContextInput`]
+    ///     and muxer-private options. On return this parameter will be replaced
+    ///     with a dict containing options that were not found. Set this to `None`
+    ///     if it's not needed.
+    pub fn write_header(&mut self, dict: &mut Option<AVDictionary>) -> Result<()> {
+        let mut dict_ptr = dict
+            .take()
+            .map(|x| x.into_raw().as_ptr())
+            .unwrap_or_else(ptr::null_mut);
+
+        let result = unsafe { ffi::avformat_write_header(self.as_mut_ptr(), &mut dict_ptr as _) };
+
+        // Move back the ownership if not consumed.
+        *dict = dict_ptr
             .upgrade()
-            .map_err(RsmpegError::WriteHeaderError)?;
+            .map(|x| unsafe { AVDictionary::from_raw(x) });
+
+        result.upgrade().map_err(RsmpegError::WriteHeaderError)?;
 
         Ok(())
     }
@@ -184,7 +278,7 @@ impl AVFormatContextOutput {
     pub fn write_trailer(&mut self) -> Result<()> {
         unsafe { ffi::av_write_trailer(self.as_mut_ptr()) }
             .upgrade()
-            .map_err(|_| RsmpegError::WriteTrailerError)?;
+            .map_err(RsmpegError::WriteTrailerError)?;
         Ok(())
     }
 
@@ -209,7 +303,7 @@ impl AVFormatContextOutput {
     pub fn write_frame(&mut self, packet: &mut AVPacket) -> Result<()> {
         unsafe { ffi::av_write_frame(self.as_mut_ptr(), packet.as_mut_ptr()) }
             .upgrade()
-            .map_err(|_| RsmpegError::WriteFrameError)?;
+            .map_err(RsmpegError::WriteFrameError)?;
         Ok(())
     }
 
@@ -237,11 +331,19 @@ impl<'stream> AVFormatContextOutput {
         }
     }
 
-    /// Get [`AVOutputFormatRef`] in the [`AVFormatContextOutput`].
-    pub fn oformat(&'stream self) -> AVOutputFormatRef<'stream> {
+    /// Get [`AVOutputFormat`] from the [`AVFormatContextOutput`].
+    pub fn oformat(&self) -> AVOutputFormatRef<'static> {
         // From the implementation of FFmpeg's `avformat_alloc_output_context2`,
         // we can be sure that `oformat` won't be null when muxing.
         unsafe { AVOutputFormatRef::from_raw(NonNull::new(self.oformat as *mut _).unwrap()) }
+    }
+
+    /// Set [`AVOutputFormat`] in the [`AVFormatContextOutput`].
+    pub fn set_oformat(&mut self, format: AVOutputFormatRef<'static>) {
+        // `as _` is for compatibility with older FFmpeg versions(< 5.0)
+        unsafe {
+            self.deref_mut().oformat = format.as_ptr() as _;
+        }
     }
 
     /// Add a new stream to a media file, should be called by the user before
@@ -276,6 +378,25 @@ impl Drop for AVFormatContextOutput {
 wrap_ref!(AVInputFormat: ffi::AVInputFormat);
 
 wrap_ref!(AVOutputFormat: ffi::AVOutputFormat);
+
+impl AVOutputFormat {
+    /// Return the output format in the list of registered output formats which
+    /// best matches the provided parameters, or return NULL if there is no
+    /// match.
+    pub fn guess_format(
+        short_name: Option<&CStr>,
+        filename: Option<&CStr>,
+        mime_type: Option<&CStr>,
+    ) -> Option<AVOutputFormatRef<'static>> {
+        let short_name = short_name.map(|x| x.as_ptr()).unwrap_or_else(ptr::null);
+        let filename = filename.map(|x| x.as_ptr()).unwrap_or_else(ptr::null);
+        let mime_type = mime_type.map(|x| x.as_ptr()).unwrap_or_else(ptr::null);
+
+        unsafe { ffi::av_guess_format(short_name, filename, mime_type) }
+            .upgrade()
+            .map(|x| unsafe { AVOutputFormatRef::from_raw(x) })
+    }
+}
 
 wrap_ref_mut!(AVStream: ffi::AVStream);
 settable!(AVStream {

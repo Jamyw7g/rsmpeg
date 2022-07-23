@@ -1,4 +1,9 @@
-use crate::{avutil::AVSamples, error::*, ffi, shared::*};
+use crate::{
+    avutil::{AVFrame, AVSamples},
+    error::*,
+    ffi,
+    shared::*,
+};
 use std::{ops::Drop, ptr};
 
 wrap!(SwrContext: ffi::SwrContext);
@@ -54,7 +59,7 @@ impl SwrContext {
     pub fn init(&mut self) -> Result<()> {
         unsafe { ffi::swr_init(self.as_mut_ptr()) }
             .upgrade()
-            .map_err(|_| RsmpegError::SwrContextInitError)?;
+            .map_err(RsmpegError::SwrContextInitError)?;
         Ok(())
     }
 
@@ -70,7 +75,36 @@ impl SwrContext {
         unsafe { ffi::swr_get_out_samples(self.as_ptr() as _, in_samples) }
     }
 
-    /// Convert audio.
+    /// Gets the delay the next input sample will experience relative to the next
+    /// output sample.
+    ///
+    /// [`SwrContext`] can buffer data if more input has been provided than available
+    /// output space, also converting between sample rates needs a delay.  This
+    /// function returns the sum of all such delays.  The exact delay is not
+    /// necessarily an integer value in either input or output sample rate.
+    /// Especially when downsampling by a large value, the output sample rate may be
+    /// a poor choice to represent the delay, similarly for upsampling and the input
+    /// sample rate.
+    ///
+    /// `base`: timebase in which the returned delay will be:
+    ///
+    /// - if it's set to 1 the returned delay is in seconds
+    /// - if it's set to 1000 the returned delay is in milliseconds
+    /// - if it's set to the input sample rate then the returned
+    ///   delay is in input samples
+    /// - if it's set to the output sample rate then the returned                  
+    ///   delay is in output samples
+    /// - if it's the least common multiple of in_sample_rate and
+    ///   out_sample_rate then an exact rounding-free delay will be
+    ///   returned
+    /// returns the delay in `1 / base` base units.
+    pub fn get_delay(&self, base: usize) -> usize {
+        unsafe { ffi::swr_get_delay(self.as_ptr() as *mut _, base.try_into().unwrap()) }
+            .try_into()
+            .unwrap()
+    }
+
+    /// Convert audio to a given [`AVSamples`] buffer.
     ///
     /// `in_buffer` and `in_count` can be set to 0 to flush the last few samples
     /// out at the end.  If more input is provided than output space, then the
@@ -79,12 +113,11 @@ impl SwrContext {
     /// required number of output samples for the given number of input samples.
     /// Conversion will run directly without copying whenever possible.
     ///
-    /// `out`       output buffers, only the first one need be set in case of packed audio
-    /// `out_count` amount of space available for output in samples per channel
-    /// `in`        input buffers, only the first one need to be set in case of packed audio
-    /// `in_count`  number of input samples available in one channel
+    /// `out_buffer`    output buffers, only the first one need be set in case of packed audio
+    /// `in`            input buffers, only the first one need to be set in case of packed audio
+    /// `in_count`      number of input samples available in one channel
     ///
-    /// return number of samples output per channel
+    /// Returns number of samples output per channel.
     ///
     /// # Safety
     ///
@@ -95,20 +128,94 @@ impl SwrContext {
         in_buffer: *const *const u8,
         in_count: i32,
     ) -> Result<i32> {
-        // ATTENTION: We can confidently use immuable reference here because we
-        // ensure the safety on SwrContext's the api level (Cannot take inner
-        // reference of the SwrContext, and also no Send & Sync implementations).
         unsafe {
-            ffi::swr_convert(
-                self.as_ptr() as _,
+            self.convert_raw(
                 out_buffer.audio_data.as_mut_ptr(),
                 out_buffer.nb_samples,
+                in_buffer,
+                in_count,
+            )
+        }
+    }
+
+    /// Convert audio.
+    ///
+    /// `in_buffer` and `in_count` can be set to 0 to flush the last few samples
+    /// out at the end.  If more input is provided than output space, then the
+    /// input will be buffered. You can avoid this buffering by using
+    /// [`SwrContext::get_out_samples`] to retrieve an upper bound on the
+    /// required number of output samples for the given number of input samples.
+    /// Conversion will run directly without copying whenever possible.
+    ///
+    /// `out_buffer`    output buffers, only the first one need be set in case of packed audio
+    /// `out_count`     amount of space available for output in samples per channel
+    /// `in`            input buffers, only the first one need to be set in case of packed audio
+    /// `in_count`      number of input samples available in one channel
+    ///
+    /// Returns number of samples output per channel.
+    ///
+    /// # Safety
+    ///
+    /// Only safe when the `in_buffer` is valid.
+    pub unsafe fn convert_raw(
+        &self,
+        out_buffer: *mut *mut u8,
+        out_count: i32,
+        in_buffer: *const *const u8,
+        in_count: i32,
+    ) -> Result<i32> {
+        // ATTENTION: We can confidently use immutable reference here because we
+        // ensure the safety on SwrContext's the api level (Cannot take inner
+        // reference of the SwrContext, and also no Send & Sync implementations).
+        //
+        // The swr_convert's documentation states: out_count is the amount of
+        // space available for output in samples per channel, rather than being
+        // the number of the output samples per channel.
+        unsafe {
+            ffi::swr_convert(
+                self.as_ptr() as *mut _,
+                out_buffer,
+                out_count,
                 in_buffer as *mut _,
                 in_count,
             )
         }
         .upgrade()
-        .map_err(|_| RsmpegError::SwrConvertError)
+        .map_err(RsmpegError::SwrConvertError)
+    }
+
+    /// Convert the samples in the input `AVFrame` and write them to the output
+    /// `AVFrame`.
+    ///
+    /// Input and output `AVFrame` must have `channel_layout`, `sample_rate` and
+    /// `format` set.
+    ///
+    /// If the output AVFrame does not have the data pointers allocated. The
+    /// nb_samples field will be set by allocating the frame.
+    ///
+    /// The output `AVFrame::nb_samples` can be 0 or have fewer allocated samples
+    /// than required.  In this case, any remaining samples not written to the
+    /// output will be added to an internal FIFO buffer, to be returned at the next
+    /// call to this function or to [`SwrContext::convert`].
+    ///
+    /// If converting sample rate, there may be data remaining in the internal
+    /// resampling delay buffer. [`SwrContext::get_delay`] tells the number of remaining
+    /// samples. To get this data as output, call this function or swr_convert()
+    /// with NULL input.
+    ///
+    /// If the `SwrContext` configuration does not match the output and input AVFrame
+    /// settings, the conversion does not take place and error is returned.
+    pub fn convert_frame(&self, input: Option<&AVFrame>, output: &mut AVFrame) -> Result<()> {
+        unsafe {
+            ffi::swr_convert_frame(
+                self.as_ptr() as *mut _,
+                output.as_mut_ptr(),
+                input.map(|x| x.as_ptr()).unwrap_or_else(ptr::null),
+            )
+        }
+        .upgrade()
+        .map_err(RsmpegError::SwrConvertError)?;
+        Ok(())
     }
 }
 

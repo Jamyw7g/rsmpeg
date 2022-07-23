@@ -48,22 +48,28 @@ impl AVFrame {
     /// Allocate new buffer(s) for audio or video data.
     /// The following fields must be set on frame before calling this function:
     ///
-    /// - format (pixel format for video, sample format for audio)
-    /// - width and height for video
-    /// - nb_samples and channel_layout for audio
+    /// Video:
+    /// - format (pixel format)
+    /// - width
+    /// - height
+    ///
+    /// Audio:
+    /// - format (sample format)
+    /// - nb_samples
+    /// - channel_layout or channels
     ///
     /// Return Error when the some of the frame settings are invalid, allocating
     /// buffer for an already initialized frame or allocation fails because of
     /// no memory.
     pub fn alloc_buffer(&mut self) -> Result<()> {
-        // If frame already has been allocated, calling av_frame_get_buffer will
+        // If frame has already been allocated, calling av_frame_get_buffer will
         // leak memory. So we do a check here.
         if self.is_allocated() {
             return Err(RsmpegError::AVFrameDoubleAllocatingError);
         }
         unsafe { ffi::av_frame_get_buffer(self.as_mut_ptr(), 0) }
             .upgrade()
-            .map_err(|_| RsmpegError::AVFrameInvalidAllocatingError)?;
+            .map_err(RsmpegError::AVFrameInvalidAllocatingError)?;
         Ok(())
     }
 
@@ -80,7 +86,8 @@ impl AVFrame {
     ///
     /// # Safety
     /// The buffer src points to cannot outlive the AVFrame. Recommend using
-    /// fill_image_buffer() instead.
+    /// fill_image_buffer() instead. And don't fill thread-local buffer in,
+    /// since `AVFrame` is `Send`.
     pub unsafe fn fill_arrays(
         &mut self,
         src: *const u8,
@@ -100,8 +107,29 @@ impl AVFrame {
             )
         }
         .upgrade()
-        .map_err(|_| RsmpegError::AVImageFillArrayError)?;
+        .map_err(RsmpegError::AVImageFillArrayError)?;
         Ok(())
+    }
+
+    /// Ensure that the frame data is writable, avoiding data copy if possible.
+    ///
+    /// Do nothing if the frame is writable, allocate new buffers and copy the
+    /// data if it is not.
+    pub fn make_writable(&mut self) -> Result<()> {
+        unsafe { ffi::av_frame_make_writable(self.as_mut_ptr()) }
+            .upgrade()
+            .map_err(RsmpegError::AVError)?;
+        Ok(())
+    }
+
+    /// Check if the frame data is writable.
+    pub fn is_writable(&self) -> Result<bool> {
+        match unsafe { ffi::av_frame_is_writable(self.as_ptr() as *mut _) }.upgrade() {
+            Ok(1) => Ok(true),
+            Ok(0) => Ok(false),
+            Ok(_) => unreachable!(),
+            Err(e) => Err(RsmpegError::AVError(e)),
+        }
     }
 }
 
@@ -144,42 +172,53 @@ impl Drop for AVFrame {
     }
 }
 
-/// It's a `AVFrame` binded with `AVImage`, the AVFrame copies the buffer
-/// pointer from the `AVImage`.
-pub struct AVFrameWithImageBuffer<'img> {
-    inner: AVFrame,
-
-    _image: &'img mut AVImage,
+/// It's a `AVFrame` binded with `AVImage`, the `AVFrame` references the buffer
+/// of the `AVImage`.
+pub struct AVFrameWithImage {
+    frame: AVFrame,
+    image: AVImage,
 }
 
-impl<'img> std::ops::Deref for AVFrameWithImageBuffer<'img> {
+impl std::ops::Deref for AVFrameWithImage {
     type Target = AVFrame;
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        &self.frame
     }
 }
 
-impl<'img> std::ops::DerefMut for AVFrameWithImageBuffer<'img> {
+impl std::ops::DerefMut for AVFrameWithImage {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        &mut self.frame
     }
 }
 
-impl<'img> AVFrameWithImageBuffer<'img> {
-    pub fn new(image: &'img mut AVImage, width: i32, height: i32, format: i32) -> Self {
+impl AVFrameWithImage {
+    /// Create a [`AVFrame`] instance and wrap it with the given [`AVImage`]
+    /// into a [`AVFrameWithImage`]. The created frame instance uses the buffer
+    /// of given [`AVImage`], and is initialized with the parameter of the given
+    /// [`AVImage`]. You can get the inner frame instance by derefenceing. You
+    /// can get the inner image instance by [`Self::image()`].
+    pub fn new(image: AVImage) -> Self {
         let mut frame = AVFrame::new();
         unsafe {
             // Borrow the image buffer.
             frame.deref_mut().data.clone_from(image.data());
             frame.deref_mut().linesize.clone_from(image.linesizes());
-            frame.deref_mut().width = width;
-            frame.deref_mut().height = height;
-            frame.deref_mut().format = format;
+            frame.deref_mut().width = image.width;
+            frame.deref_mut().height = image.height;
+            frame.deref_mut().format = image.pix_fmt;
         }
-        Self {
-            inner: frame,
-            _image: image,
-        }
+        Self { frame, image }
+    }
+
+    /// Get reference to inner [`AVImage`] instance.
+    pub fn image(&self) -> &AVImage {
+        &self.image
+    }
+
+    /// Convert `self` into an [`AVImage`] instance.
+    pub fn into_image(self) -> AVImage {
+        self.image
     }
 }
 
@@ -216,7 +255,7 @@ mod test {
         let mut frame = AVFrame::new();
         assert!(matches!(
             frame.alloc_buffer(),
-            Err(RsmpegError::AVFrameInvalidAllocatingError)
+            Err(RsmpegError::AVFrameInvalidAllocatingError(_))
         ));
     }
 
@@ -232,5 +271,12 @@ mod test {
             frame.alloc_buffer(),
             Err(RsmpegError::AVFrameDoubleAllocatingError)
         ));
+    }
+
+    #[test]
+    fn test_frame_with_image_buffer() {
+        let image = AVImage::new(ffi::AVPixelFormat_AV_PIX_FMT_RGB24, 256, 256, 0).unwrap();
+        let frame = AVFrameWithImage::new(image);
+        let _: &Vec<u8> = &frame.image;
     }
 }
